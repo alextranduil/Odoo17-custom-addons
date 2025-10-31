@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <record id="res_config_settings_openai_view_form" model="ir.ui.view">
+        <field name="name">res.config.settings.openai.view.form.inherit.hr.recruitment</field>
+        <field name="model">res.config.settings</field>
+        <field name="inherit_id" ref="hr_recruitment.res_config_settings_view_form"/>
+        <field name="arch" type="xml">
+            <!--
+                This XPath targets the block containing the default 'recruitment_extract_settings'
+                (for Odoo Enterprise's IAP feature) and inserts our new
+                OpenAI settings block right after it.
+            -->
+            <xpath expr="//setting[@id='recruitment_extract_settings']" position="after">
+                <setting id="openai_extract_settings" string="CV Data Extraction (OpenAI)" company_dependent="1" help="Automatically extract data from CVs using OpenAI.">
+                    <div class="o_setting_right_pane">
+                        <label for="openai_cv_extract_mode"/>
+                        <div class="text-muted">
+                            Select how CV attachments are sent for extraction.
+                        </div>
+                        <div class="mt16">
+                            <field name="openai_cv_extract_mode" class="o_light_label" widget="radio" required="True"/>
+                        </div>
+                        <div class="mt16" invisible="openai_cv_extract_mode == 'no_send'">
+                            <label for="openai_api_key" class="o_form_label"/>
+                            <field name="openai_api_key" widget="password" placeholder="sk-...................."/>
+                        </div>
+                        <div class="mt16" invisible="openai_cv_extract_mode == 'no_send'">
+                            <label for="openai_model" class="o_form_label"/>
+                            <field name="openai_model" required="True"/>
+                        </div>
+                    </div>
+                </setting>
+            </xpath>
+        </field>
+    </record>
+
+</odoo>
