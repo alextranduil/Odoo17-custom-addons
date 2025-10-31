@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="hr_applicant_gemini_view_form" model="ir.ui.view">
+        <field name="name">hr.applicant.gemini.view.form</field>
+        <field name="model">hr.applicant</field>
+        <field name="inherit_id" ref="hr_recruitment.hr_applicant_view_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//header" position="inside">
+                <field name="can_extract_with_gemini" invisible="1"/>
+                <button name="action_extract_with_gemini"
+                    class="oe_highlight"
+                    string="Extract with Gemini"
+                    type="object"
+                    invisible="not can_extract_with_gemini"
+                    data-hotkey="g"/>
+            </xpath>
+            <xpath expr="//header" position="after">
+                <field name="gemini_extract_state" invisible="1"/>
+                <div role="status" class="alert alert-info text-center"
+                     invisible="gemini_extract_state != 'processing'">
+                    <i class="fa fa-fw fa-spin fa-spinner" title="Processing"/>
+                    <span class="ms-1"><field name="gemini_extract_status"/></span>
+                </div>
+                <div role="status" class="alert alert-info text-center"
+                     invisible="gemini_extract_state != 'pending'">
+                    <i class="fa fa-fw fa-clock-o" title="Pending"/>
+                    <span class="ms-1"><field name="gemini_extract_status"/></span>
+                </div>
+                <div role="status" class="alert alert-danger text-center"
+                     invisible="gemini_extract_state != 'error'">
+                    <i class="fa fa-fw fa-exclamation-triangle" title="Error"/>
+                    <span class="ms-1"><field name="gemini_extract_status"/></span>
+                    <button name="action_extract_with_gemini"
+                        class="btn btn-link"
+                        string="Retry"
+                        type="object"/>
+                </div>
+            </xpath>
+        </field>
+    </record>
+</odoo>
