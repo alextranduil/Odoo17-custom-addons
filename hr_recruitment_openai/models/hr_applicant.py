@@ -187,150 +187,268 @@ class HrApplicant(models.Model):
             except Exception as e2:
                 _logger.error("Could not write thread error state to applicants: %s", str(e2))
 
+    # --- REFACTORED: Core logic split into reusable @api.model methods ---
+
+    @api.model
+    def _openai_get_client(self, company_id=None):
+        """
+        Reusable helper to get configuration and the OpenAI client.
+        This can be called by other models.
+
+        Args:
+            company_id (int, optional): The ID of the company to get settings from.
+                                        If None, falls back to self.env.company.
+
+        Returns:
+            (openai.OpenAI, str): A tuple of the (client, model_name).
+        """
+        # In a @api.model method, self is the model/environment
+        if company_id:
+            company = self.env['res.company'].browse(company_id)
+        else:
+            company = self.env.company
+
+        # Strip whitespace from config fields to prevent UnicodeErrors
+        api_key = (company.openai_api_key or '').strip()
+        model_name = (company.openai_model or 'gpt-4o-mini').strip()
+
+        # 1. Validate Configuration
+        if not api_key:
+            raise UserError(_("OpenAI API Key is not set in HR Settings (or is invalid after stripping whitespace)."))
+        if not model_name:
+            raise UserError(_("OpenAI Model is not set in HR Settings (or is invalid after stripping whitespace)."))
+        
+        return openai.OpenAI(api_key=api_key), model_name
+
+    @api.model
+    def _openai_call_for_cv(self, attachment):
+        """
+        Reusable method to call the OpenAI API for a single CV attachment.
+        This is a @api.model method and can be called from any model via
+        self.env['hr.applicant']._openai_call_for_cv(att)
+
+        Args:
+            attachment (ir.attachment): The attachment record to process.
+
+        Returns:
+            str: The raw text response from the OpenAI API.
+        """
+        # 1. Get client and config
+        # Get company from attachment first, or fall back to env company
+        company = attachment.company_id or self.env.company
+        client, model_name = self._openai_get_client(company.id)
+
+        # 2. Validate attachment
+        if not attachment:
+            raise UserError(_("No attachment provided."))
+        if not attachment.datas:
+            raise UserError(_("Attached CV is empty: %s", attachment.name))
+
+        _logger.info("Starting OpenAI call for attachment: %s", attachment.name)
+
+        # 3. Prepare data and client
+        # We send the raw base64 data directly from Odoo
+        base64_string = attachment.datas.decode('utf-8')
+        file_data_uri = f"data:{attachment.mimetype};base64,{base64_string}"
+
+        # 4. Build the input payload
+        user_content = [
+            {
+                "type": "input_file",
+                "filename": attachment.name,
+                "file_data": file_data_uri,
+            },
+            {
+                "type": "input_text",
+                "text": "Please extract the data from the attached CV file and return it as JSON.",
+            },
+        ]
+
+        # 5. Configure and call the OpenAI API using client.responses.create()
+        try:
+            _logger.info("Calling OpenAI model '%s' for attachment %s using client.responses.create", model_name, attachment.name)
+
+            response = client.responses.create(
+                model=model_name,
+                input=[
+                    {
+                        "role": "system",
+                        "content": OPENAI_CV_EXTRACTION_PROMPT
+                    },
+                    {
+                        "role": "user",
+                        "content": user_content
+                    }
+                ],
+                temperature=0, # Use 0 for deterministic JSON output
+            )
+            
+            # As per docs, output is in response.output_text
+            response_text = response.output_text
+
+        except Exception as e:
+            _logger.error("OpenAI API call failed: %s", str(e), exc_info=True)
+            raise UserError(_("OpenAI API call failed: %s", str(e)))
+
+        _logger.debug(
+            "OpenAI Raw Response for attachment %s:\n%s",
+            attachment.name,
+            response_text
+        )
+        return response_text
+
+    @api.model
+    def _parse_openai_response(self, response_text, record_id=None):
+        """
+        Cleans and parses the text response from OpenAI.
+        This is a @api.model method.
+
+        Args:
+            response_text (str): The raw text from OpenAI.
+            record_id (str, optional): A reference ID for logging (e.g., applicant ID or job ID).
+        """
+        log_id = record_id or 'unknown'
+        try:
+            # First, try to parse directly.
+            try:
+                return json.loads(response_text)
+            except json.JSONDecodeError:
+                _logger.warning("Direct JSON parsing failed for %s, checking for fences.", log_id)
+                # Fallback to regex search if direct parsing fails
+                pass
+
+            # Fallback 1: find json block
+            match = re.search(r"```json\n(.*?)\n```", response_text, re.DOTALL)
+            if match:
+                json_text = match.group(1)
+            else:
+                # Fallback 2: look for { ... }
+                match = re.search(r"\{.*\}", response_text, re.DOTALL)
+                if match:
+                    json_text = match.group(0)
+                else:
+                    _logger.error(
+                        "No JSON object found in OpenAI response for %s. Raw text: %s",
+                        log_id,
+                        response_text
+                    )
+                    raise json.JSONDecodeError("No JSON object found in response.", response_text, 0)
+
+            json_text = json_text.strip()
+            return json.loads(json_text)
+
+        except json.JSONDecodeError as e:
+            _logger.error(
+                "OpenAI response was not valid JSON for %s: %s. Raw text: %s",
+                log_id,
+                str(e),
+                response_text
+            )
+            raise UserError(_(
+                "OpenAI returned an invalid response that could not be parsed. Raw text: %s",
+                response_text
+            ))
+            
+    def _process_extracted_cv_data(self, extracted_data):
+        """
+        Reusable method to write all extracted data (simple fields and skills)
+        to `self` (an hr.applicant record).
+        
+        This is an INSTANCE method, as it operates on a specific applicant.
+        
+        Args:
+            extracted_data (dict): The parsed JSON data from OpenAI.
+            
+        Returns:
+            str: A status message for the operation.
+        """
+        self.ensure_one()
+        skill_status_message = _('Successfully extracted data.')
+        openai_skills_list = []
+
+        # --- Transaction Step 1: Process Simple Data ---
+        try:
+            with self.env.cr.savepoint():
+                self._write_extracted_data(extracted_data)
+                
+                # Check for skills to process
+                if (extracted_data.get('skills') and
+                        self.env['ir.module.module']._get('hr_recruitment_skills').state == 'installed'):
+                    openai_skills_list = extracted_data.get('skills')
+        except Exception as e_simple:
+            _logger.error(
+                "Failed to write simple data for Applicant %s: %s.",
+                self.id, str(e_simple), exc_info=True
+            )
+            # Re-raise to stop processing; the caller will handle the rollback
+            raise UserError(_("Failed to write simple data: %s") % str(e_simple))
+
+
+        # --- Transaction Step 2: Process Skills ---
+        if openai_skills_list:
+            try:
+                with self.env.cr.savepoint():
+                    _logger.info("Processing %s skills for Applicant %s", len(openai_skills_list), self.id)
+                    self._process_skills(openai_skills_list)
+            except Exception as e_skill:
+                _logger.error(
+                    "Failed to process skills for Applicant %s: %s. "
+                    "Simple data will be kept.",
+                    self.id, str(e_skill), exc_info=True
+                )
+                # Update status message to reflect partial success
+                skill_status_message = _(
+                    "Successfully saved simple data, "
+                    "but failed to process skills: %s", str(e_skill)
+                )
+                # The savepoint automatically rolled back the failed skill transaction.
+
+        return skill_status_message
+
+
     def _run_openai_extraction(self):
         """
         Main extraction logic, designed to be run in a thread.
-        It iterates over each applicant, calls the OpenAI API,
-        parses the response, and writes the data.
-
-        Each applicant is processed in its own transaction savepoint
-        to isolate failures, ensuring one applicant's error doesn't
-        stop the entire batch.
+        This is now a simple orchestrator for the reusable methods.
         """
         for applicant in self:
-            skill_status_message = _('Successfully extracted data.')
-            openai_skills_list = []
-
             try:
-                # --- Transaction Step 1: Read, Call API, Write Simple Data ---
-                # Use a savepoint to roll back this applicant's changes on failure
-                # without affecting other applicants in the loop.
+                # --- Transaction Step 1: Call API and Process Data ---
                 with self.env.cr.savepoint():
                     _logger.info("Starting OpenAI extraction for applicant ID: %s", applicant.id)
-                    company = applicant.company_id or self.env.company
-
-                    # Strip whitespace from config fields to prevent UnicodeErrors
-                    api_key = (company.openai_api_key or '').strip()
-                    model_name = (company.openai_model or 'gpt-4o-mini').strip()
-
-                    # 1. Validate Configuration
-                    if not api_key:
-                        raise UserError(_("OpenAI API Key is not set in HR Settings (or is invalid after stripping whitespace)."))
-                    if not model_name:
-                        raise UserError(_("OpenAI Model is not set in HR Settings (or is invalid after stripping whitespace)."))
-                    if not applicant.message_main_attachment_id:
-                        raise UserError(_("No CV attached."))
-
-                    attachment = applicant.message_main_attachment_id
-                    if not attachment.datas:
-                        raise UserError(_("Attached CV is empty."))
-
-                    # 2. Set state to 'processing'
+                    
+                    # 1. Set state to 'processing'
                     applicant.write({
                         'openai_extract_state': 'processing',
                         'openai_extract_status': _('Processing: Calling OpenAI API...'),
                     })
 
-                    # 3. Prepare data and client
-                    # We send the raw base64 data directly from Odoo
-                    base64_string = attachment.datas.decode('utf-8')
-                    file_data_uri = f"data:{attachment.mimetype};base64,{base64_string}"
+                    # 2. Call API (Reusable @api.model method)
+                    response_text = self.env['hr.applicant']._openai_call_for_cv(applicant.message_main_attachment_id)
 
-                    client = openai.OpenAI(api_key=api_key)
-
-                    # 4. Build the input payload using the Base64 method
-                    # This structure is based on the OpenAI documentation
-                    # for the client.responses.create() endpoint.
-                    user_content = [
-                        {
-                            "type": "input_file",
-                            "filename": attachment.name,
-                            "file_data": file_data_uri,
-                        },
-                        {
-                            "type": "input_text",
-                            "text": "Please extract the data from the attached CV file and return it as JSON.",
-                        },
-                    ]
-
-                    # 5. Configure and call the OpenAI API using client.responses.create()
-                    try:
-                        _logger.info("Calling OpenAI model '%s' for applicant %s using client.responses.create", model_name, applicant.id)
-
-                        response = client.responses.create(
-                            model=model_name,
-                            input=[
-                                {
-                                    "role": "system",
-                                    "content": OPENAI_CV_EXTRACTION_PROMPT
-                                },
-                                {
-                                    "role": "user",
-                                    "content": user_content
-                                }
-                            ],
-                            temperature=0, # Use 0 for deterministic JSON output
-                        )
-                        
-                        # As per docs, output is in response.output_text
-                        response_text = response.output_text
-
-                    except Exception as e:
-                        _logger.error("OpenAI API call failed: %s", str(e), exc_info=True)
-                        raise UserError(_("OpenAI API call failed: %s", str(e)))
-
-                    _logger.debug(
-                        "OpenAI Raw Response for Applicant %s:\n%s",
-                        applicant.id,
-                        response_text
-                    )
-
-                    # 6. Parse Response
+                    # 3. Parse Response (Reusable @api.model method)
                     applicant.write({
                         'openai_extract_status': _('Processing: Parsing response...'),
                     })
-                    extracted_data = self._parse_openai_response(response_text)
+                    extracted_data = self.env['hr.applicant']._parse_openai_response(
+                        response_text,
+                        record_id=f"applicant_{applicant.id}"
+                    )
                     _logger.info(
                         "Parsed Data for Applicant %s: \n%s",
                         applicant.id,
                         json.dumps(extracted_data, indent=2)
                     )
 
-                    # 7. Write Simple Fields
-                    applicant._write_extracted_data(extracted_data)
+                    # 4. Write all data (Reusable INSTANCE method)
+                    skill_status_message = applicant._process_extracted_cv_data(extracted_data)
 
-                    # 8. Check for skills to process
-                    if (extracted_data.get('skills') and
-                            self.env['ir.module.module']._get('hr_recruitment_skills').state == 'installed'):
-                        openai_skills_list = extracted_data.get('skills')
-
-                # --- Transaction Step 2: Process Skills ---
-                # This is in a separate savepoint. If it fails,
-                # Step 1 (simple data) will still be committed.
-                if openai_skills_list:
-                    try:
-                        with self.env.cr.savepoint():
-                            _logger.info("Processing %s skills for Applicant %s", len(openai_skills_list), applicant.id)
-                            applicant._process_skills(openai_skills_list)
-                    except Exception as e_skill:
-                        _logger.error(
-                            "Failed to process skills for Applicant %s: %s. "
-                            "Simple data will be kept.",
-                            applicant.id, str(e_skill), exc_info=True
-                        )
-                        # Update status message to reflect partial success
-                        skill_status_message = _(
-                            "Successfully saved simple data, "
-                            "but failed to process skills: %s", str(e_skill)
-                        )
-                        # The savepoint automatically rolled back the failed skill transaction.
-
-                # --- Transaction Step 3: Commit all successful changes for this applicant ---
+                # --- Transaction Step 2: Commit all successful changes for this applicant ---
                 applicant.write({
                     'openai_extract_state': 'done',
                     'openai_extract_status': skill_status_message,
                 })
-                # This commits Step 1 and (if successful) Step 2
+                # This commits Step 1 (API call, data processing)
                 self.env.cr.commit()
 
             except Exception as e:
@@ -359,54 +477,7 @@ class HrApplicant(models.Model):
                     _logger.error("Could not write error state to applicant %s: %s", applicant.id, str(e2))
                     self.env.cr.rollback()
 
-
-    def _parse_openai_response(self, response_text):
-        """
-        Cleans and parses the text response from OpenAI.
-        It expects a JSON object, but includes fallback logic
-        for markdown fences (```json) just in case.
-        """
-        try:
-            # First, try to parse directly. This should be the most
-            # common case with temperature=0 and a good prompt.
-            try:
-                return json.loads(response_text)
-            except json.JSONDecodeError:
-                _logger.warning("Direct JSON parsing failed for applicant %s, checking for fences.", self.id)
-                # Fallback to regex search if direct parsing fails
-                pass
-
-            # Fallback 1: try to find a JSON block fenced by ```json ... ```
-            match = re.search(r"```json\n(.*?)\n```", response_text, re.DOTALL)
-            if match:
-                json_text = match.group(1)
-            else:
-                # Fallback 2: look for the first { and last }
-                match = re.search(r"\{.*\}", response_text, re.DOTALL)
-                if match:
-                    json_text = match.group(0)
-                else:
-                    _logger.error(
-                        "No JSON object found in OpenAI response for applicant %s. Raw text: %s",
-                        self.id,
-                        response_text
-                    )
-                    raise json.JSONDecodeError("No JSON object found in response.", response_text, 0)
-
-            json_text = json_text.strip()
-            return json.loads(json_text)
-
-        except json.JSONDecodeError as e:
-            _logger.error(
-                "OpenAI response was not valid JSON for applicant %s: %s. Raw text: %s",
-                self.id,
-                str(e),
-                response_text
-            )
-            raise UserError(_(
-                "OpenAI returned an invalid response that could not be parsed. Raw text: %s",
-                response_text
-            ))
+    # --- DATA WRITING METHODS (Unchanged, but now called by _process_extracted_cv_data) ---
 
     def _write_extracted_data(self, data):
         """
@@ -489,6 +560,7 @@ class HrApplicant(models.Model):
         Returns:
             hr.skill.level: The default skill level record.
         """
+        self.ensure_one() # This is an instance method, so self is an applicant
         skill_level_env = self.env['hr.skill.level']
         default_name = 'Beginner'
         default_progress = 15
@@ -670,5 +742,3 @@ class HrApplicant(models.Model):
                 # Re-raise to roll back this applicant's entire skill transaction
                 # The outer savepoint in _run_openai_extraction will catch this.
                 raise
-
-
