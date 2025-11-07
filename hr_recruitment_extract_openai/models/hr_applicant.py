@@ -119,8 +119,7 @@ class HrApplicant(models.Model):
     def action_extract_with_openai(self):
         """
         Action triggered by the 'Extract with OpenAI' button.
-        - Uses queue_job (with_delay) instead of threading.
-        - Notifies the user on start.
+        Uses queue_job (with_delay) for background processing and notifies the user.
         """
         applicants_to_process = self.filtered(lambda a: a.can_extract_with_openai)
         if not applicants_to_process:
@@ -150,6 +149,20 @@ class HrApplicant(models.Model):
             }
         }
 
+    def _notify_user(self, user_id, params):
+        """Helper to send a notification to a specific user."""
+        try:
+            # Use a new cursor to ensure notification is sent
+            # even if the main transaction is rolled back.
+            with odoo.registry(self.env.cr.dbname).cursor() as notify_cr:
+                notify_env = api.Environment(notify_cr, self.env.uid, self.env.context)
+                user = notify_env['res.users'].browse(user_id)
+                if user.partner_id:
+                    notify_env['bus.bus']._sendone(user.partner_id, 'simple_notification', params)
+                notify_cr.commit()
+        except Exception as e:
+            _logger.error("Failed to send notification to user %s: %s", user_id, str(e))
+
     def _run_openai_extraction_job(self, user_id):
         """
         This method runs in the background via the Odoo job queue.
@@ -157,15 +170,12 @@ class HrApplicant(models.Model):
         """
         self.ensure_one()
         applicant = self
-        user = self.env['res.users'].browse(user_id)
-        partner = user.partner_id
         
         success = False
         error_message = ""
 
         try:
-            # The job queue wraps this whole method in a transaction.
-            # We use a savepoint to manage partial commits/rollbacks.
+            # Use a savepoint to manage partial commits/rollbacks.
             with self.env.cr.savepoint():
                 _logger.info("Starting OpenAI extraction for applicant ID: %s", applicant.id)
                 
@@ -195,7 +205,7 @@ class HrApplicant(models.Model):
                 # 4. Write all data (Reusable INSTANCE method)
                 skill_status_message = applicant._process_extracted_cv_data(extracted_data)
 
-            # If step 1 was successful, the savepoint is committed.
+            # If steps 1-4 were successful, the savepoint is committed.
             applicant.write({
                 'openai_extract_state': 'done',
                 'openai_extract_status': skill_status_message,
@@ -203,7 +213,7 @@ class HrApplicant(models.Model):
             success = True
 
         except Exception as e:
-            # Catch ALL errors from Step 1 (API, Parse, Write)
+            # ALL errors (including concurrency) are now treated as failures.
             _logger.error(
                 "OpenAI extraction for applicant %s failed: %s",
                 applicant.id,
@@ -221,51 +231,47 @@ class HrApplicant(models.Model):
             })
             # Commit the error state
             self.env.cr.commit()
+            success = False
 
         finally:
-            # Send final notification
+            # This block now *always* sends a notification.
+            params = {}
             if success:
-                message = _("Successfully extracted CV data for applicant '%s'.", applicant.name)
                 params = {
                     'title': _('Processing Complete'),
-                    'message': message,
+                    'message': _("Successfully extracted CV data for applicant '%s'.", applicant.name),
                     'type': 'success',
                     'sticky': False,
                 }
             else:
-                message = _("Failed to extract CV data for applicant '%s'.\n%s", applicant.name, error_message)
-                params = {
-                    'title': _('Processing Failed'),
-                    'message': message,
-                    'type': 'warning',
-                    'sticky': True,
-                }
-            
-            self.env['bus.bus']._sendone(partner, 'simple_notification', params)
+                # Only send error notification if an error message was set
+                if error_message:
+                    params = {
+                        'title': _('Processing Failed'),
+                        'message': _("Failed to extract CV data for applicant '%s'.\n%s", applicant.name, error_message),
+                        'type': 'warning',
+                        'sticky': True,
+                    }
+
+            if params:
+                # Send the success or failure notification
+                self._notify_user(user_id, params)
 
     @api.model
     def _openai_get_client(self, company_id=None):
         """
         Reusable helper to get configuration and the OpenAI client.
-        This can be called by other models.
-
-        Args:
-            company_id (int, optional): The ID of the company to get settings from.
-                                        If None, falls back to self.env.company.
-
-        Returns:
-            (openai.OpenAI, str): A tuple of the (client, model_name).
         """
         if company_id:
             company = self.env['res.company'].browse(company_id)
         else:
             company = self.env.company
 
-        # Strip whitespace from config fields to prevent UnicodeErrors
+        # Strip whitespace from config fields
         api_key = (company.openai_api_key or '').strip()
         model_name = (company.openai_model or 'gpt-4o-mini').strip()
 
-        # 1. Validate Configuration
+        # Validate Configuration
         if not api_key:
             raise UserError(_("OpenAI API Key is not set in HR Settings (or is invalid after stripping whitespace)."))
         if not model_name:
@@ -277,14 +283,6 @@ class HrApplicant(models.Model):
     def _openai_call_for_cv(self, attachment):
         """
         Reusable method to call the OpenAI API for a single CV attachment.
-        This is a @api.model method and can be called from any model via
-        self.env['hr.applicant']._openai_call_for_cv(att)
-
-        Args:
-            attachment (ir.attachment): The attachment record to process.
-
-        Returns:
-            str: The raw text response from the OpenAI API.
         """
         # 1. Get client and config
         company = attachment.company_id or self.env.company
@@ -315,7 +313,7 @@ class HrApplicant(models.Model):
             },
         ]
 
-        # 5. Configure and call the OpenAI API using client.responses.create()
+        # 5. Configure and call the OpenAI API
         try:
             _logger.info("Calling OpenAI model '%s' for attachment %s using client.responses.create", model_name, attachment.name)
 
@@ -351,11 +349,6 @@ class HrApplicant(models.Model):
     def _parse_openai_response(self, response_text, record_id=None):
         """
         Cleans and parses the text response from OpenAI.
-        This is a @api.model method.
-
-        Args:
-            response_text (str): The raw text from OpenAI.
-            record_id (str, optional): A reference ID for logging (e.g., applicant ID or job ID).
         """
         log_id = record_id or 'unknown'
         try:
@@ -364,7 +357,6 @@ class HrApplicant(models.Model):
                 return json.loads(response_text)
             except json.JSONDecodeError:
                 _logger.warning("Direct JSON parsing failed for %s, checking for fences.", log_id)
-                # Fallback to regex search if direct parsing fails
                 pass
 
             # Fallback 1: find json block
@@ -403,14 +395,6 @@ class HrApplicant(models.Model):
         """
         Reusable method to write all extracted data (simple fields and skills)
         to `self` (an hr.applicant record).
-        
-        This is an INSTANCE method, as it operates on a specific applicant.
-        
-        Args:
-            extracted_data (dict): The parsed JSON data from OpenAI.
-            
-        Returns:
-            str: A status message for the operation.
         """
         self.ensure_one()
         skill_status_message = _('Successfully extracted data.')
@@ -430,7 +414,6 @@ class HrApplicant(models.Model):
                 "Failed to write simple data for Applicant %s: %s.",
                 self.id, str(e_simple), exc_info=True
             )
-            # Re-raise to stop processing; the caller will handle the rollback
             raise UserError(_("Failed to write simple data: %s") % str(e_simple))
 
 
@@ -451,7 +434,6 @@ class HrApplicant(models.Model):
                     "Successfully saved simple data, "
                     "but failed to process skills: %s", str(e_skill)
                 )
-                # The savepoint automatically rolled back the failed skill transaction.
 
         return skill_status_message
 
@@ -459,7 +441,6 @@ class HrApplicant(models.Model):
         """
         Writes the extracted simple fields (name, email, etc.)
         from the JSON data to the applicant record.
-        This will overwrite existing data if new data is found.
         """
         self.ensure_one()
         if not data:
@@ -484,7 +465,7 @@ class HrApplicant(models.Model):
         if data.get('linkedin'):
             linkedin_url = data['linkedin']
             # Try to extract URL from markdown [text](url) or just a raw url
-            match = re.search(r'(https?://[^\s)\]]+)', linkedin_url)
+            match = re.search(r'(https://[^\s)\]]+)', linkedin_url)
             if match:
                 write_vals['linkedin_profile'] = match.group(1)
             else:
@@ -501,12 +482,11 @@ class HrApplicant(models.Model):
                 if not degree_rec:
                     _logger.info("Creating new degree: %s", degree_name)
                     try:
-                        # Create if not found, but don't fail the whole
-                        # transaction if this one create fails.
+                        # Create if not found
                         degree_rec = degree_env.create({'name': degree_name})
                     except Exception as e:
                         _logger.error("Failed to create degree '%s': %s", degree_name, str(e))
-                        pass  # Log and continue
+                        pass # Log and continue
 
                 if degree_rec:
                     write_vals['type_id'] = degree_rec.id
@@ -523,19 +503,9 @@ class HrApplicant(models.Model):
 
     def _get_or_create_default_skill_level(self):
         """
-        Finds or creates a 'Beginner (15%)' skill level to use as a fallback
-        when a skill level is not provided or recognized.
-        
-        This uses a multi-step fallback to be robust:
-        1. Try to find the exact match (Name + Progress).
-        2. Fallback to finding by name only.
-        3. Fallback to finding the lowest progress level > 0.
-        4. Fallback to creating the level.
-
-        Returns:
-            hr.skill.level: The default skill level record.
+        Finds or creates a 'Beginner (15%)' skill level to use as a fallback.
         """
-        self.ensure_one() # This is an instance method, so self is an applicant
+        self.ensure_one()
         skill_level_env = self.env['hr.skill.level']
         default_name = 'Beginner'
         default_progress = 15
@@ -571,9 +541,9 @@ class HrApplicant(models.Model):
                     'level_progress': default_progress
                 })
             except Exception as e:
-                _logger.error("Failed to create default 'Beginner (15%)' skill level: %s", str(e))
+                _logger.error("Failed to create default 'Beginner (1B%)' skill level: %s", str(e))
                 raise UserError(_(
-                    "Could not create default 'Beginner (15%)' skill level. "
+                    "Could not create default 'Beginner (1B%)' skill level. "
                     "Please create one manually in the Skills module. Error: %s"
                 ) % str(e))
 
@@ -581,16 +551,7 @@ class HrApplicant(models.Model):
 
     def _process_skills(self, skills_list):
         """
-        Processes the structured skill list from OpenAI:
-        [ {"type": "...", "skill": "...", "level": "..."}, ... ]
-        
-        It finds or creates Skill Types, Skill Levels, and Skills,
-        then links them to the applicant.
-        
-        This method uses caches to reduce database queries within the loop.
-        
-        Args:
-            skills_list (list): A list of skill dictionaries from OpenAI.
+        Processes the structured skill list from OpenAI.
         """
         self.ensure_one()
         if not skills_list or not isinstance(skills_list, list):
@@ -602,7 +563,7 @@ class HrApplicant(models.Model):
         skill_env = self.env['hr.skill']
         applicant_skill_env = self.env['hr.applicant.skill']
 
-        # Cache for records found/created in this run to reduce DB queries
+        # Cache for records found/created in this run
         type_cache = {}
         level_cache = {}
         skill_cache = {}
@@ -665,11 +626,11 @@ class HrApplicant(models.Model):
 
                 # If no level found/created after all checks, get the default
                 if not skill_level:
-                    if not default_level:  # Lazy-load
+                    if not default_level:
                         default_level = self._get_or_create_default_skill_level()
                     skill_level = default_level
 
-                # --- 3. Associate Level with Type (Fixes NOT NULL constraint) ---
+                # --- 3. Associate Level with Type ---
                 # This is required by the `hr_recruitment_skills` module
                 if skill_level not in skill_type.skill_level_ids:
                     skill_type.write({'skill_level_ids': [(4, skill_level.id)]})
@@ -715,5 +676,4 @@ class HrApplicant(models.Model):
                     skill_obj, self.id, str(e_item), exc_info=True
                 )
                 # Re-raise to roll back this applicant's entire skill transaction
-                # The outer savepoint in _run_openai_extraction will catch this.
                 raise

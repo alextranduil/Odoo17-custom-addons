@@ -7,7 +7,6 @@ import re
 
 from odoo import api, fields, models, _
 from odoo.exceptions import UserError
-from odoo.addons.hr_recruitment_extract_openai.models.hr_applicant import OPENAI_CV_EXTRACTION_PROMPT
 
 _logger = logging.getLogger(__name__)
 
@@ -23,6 +22,16 @@ class HrJob(models.Model):
         string='CVs to Process',
         help="Upload multiple CVs here to create applicants in bulk."
     )
+    processed_cv_attachment_ids = fields.Many2many(
+        'ir.attachment',
+        'hr_job_cv_attachment_processed_rel',
+        'job_id',
+        'attachment_id',
+        string='Processed CVs',
+        copy=False,
+        readonly=True,
+        help="CVs that have been successfully processed and had an applicant created."
+    )
     processing_in_progress = fields.Boolean(
         string="Processing CVs",
         default=False,
@@ -35,13 +44,20 @@ class HrJob(models.Model):
         copy=False,
         help="Indicates that a bulk processing has been completed."
     )
+    processing_failed = fields.Boolean(
+        string="Processing Failed",
+        default=False,
+        copy=False,
+        help="Indicates that one or more CVs failed during the last processing run."
+    )
 
     # --- Button Actions ---
 
     def action_process_cvs(self):
         """
         Triggered by the 'Add Candidates' button.
-        Sets flags and launches the background job.
+        Calculates only the CVs that have not been processed yet and
+        launches a background job for them.
         """
         self.ensure_one()
 
@@ -56,22 +72,29 @@ class HrJob(models.Model):
             if job.processing_in_progress:
                 raise UserError(_("Processing is already in progress. Please wait until it is complete."))
             
-            if job.processing_complete:
-                raise UserError(_("Processing has already been completed for these files. Please delete the attached files to start a new batch."))
-
             if not job.cv_attachment_ids:
                 raise UserError(_("Please attach CV files before processing."))
 
-            _logger.info("--- Button 'action_process_cvs' TRIGGERED by user %s ---", self.env.user.name)
+            # Calculate which attachments to process
+            attachments_to_process = job.cv_attachment_ids - job.processed_cv_attachment_ids
+
+            if not attachments_to_process:
+                raise UserError(_("All attached CVs have already been processed successfully. Please delete the attached files to start a new batch."))
+
+            _logger.info(
+                "--- Button 'action_process_cvs' TRIGGERED by user %s for %s CVs ---",
+                self.env.user.name, len(attachments_to_process)
+            )
 
             # Write the flags. This is now safe.
             job.write({
                 'processing_in_progress': True,
-                'processing_complete': False
+                'processing_complete': False,
+                'processing_failed': False
             })
 
-            # Pass the user ID to notify the correct user
-            job.with_delay()._process_cvs_thread(self.env.user.id)
+            # Pass the user ID and attachment IDs to the job
+            job.with_delay()._process_cvs_thread(self.env.user.id, attachments_to_process.ids)
 
             # Return a toast notification to the user
             return {
@@ -79,7 +102,10 @@ class HrJob(models.Model):
                 'tag': 'display_notification',
                 'params': {
                     'title': _('Processing Started'),
-                    'message': _('The CV processing has started. You will be notified upon completion.'),
+                    'message': _(
+                        'Processing has started for %s CV(s). You will be notified upon completion.',
+                        len(attachments_to_process)
+                    ),
                     'type': 'info',
                     'sticky': False,
                 }
@@ -93,7 +119,7 @@ class HrJob(models.Model):
     def action_delete_cv_attachments(self):
         """
         Triggered by the 'Delete Attached Files' button.
-        Removes the attachments from the job and resets flags.
+        Removes the attachments from the job and resets all flags.
         """
         self.ensure_one()
         attachment_count = len(self.cv_attachment_ids)
@@ -105,8 +131,10 @@ class HrJob(models.Model):
         # Clear the m2m relation and reset flags
         self.write({
             'cv_attachment_ids': [(5, 0, 0)],
+            'processed_cv_attachment_ids': [(5, 0, 0)],
             'processing_complete': False,
-            'processing_in_progress': False, # Just in case
+            'processing_in_progress': False,
+            'processing_failed': False,
         })
 
         return {
@@ -120,18 +148,28 @@ class HrJob(models.Model):
             }
         }
 
+    def _notify_user(self, user_id, params):
+        """Helper to send a notification to a specific user."""
+        try:
+            # Use a new cursor to ensure notification is sent
+            with odoo.registry(self.env.cr.dbname).cursor() as notify_cr:
+                notify_env = api.Environment(notify_cr, self.env.uid, self.env.context)
+                user = notify_env['res.users'].browse(user_id)
+                if user.partner_id:
+                    notify_env['bus.bus']._sendone(user.partner_id, 'simple_notification', params)
+                notify_cr.commit()
+        except Exception as e:
+            _logger.error("Failed to send notification to user %s: %s", user_id, str(e))
+
     # --- Background Processing ---
 
-    def _process_cvs_thread(self, user_id):
+    def _process_cvs_thread(self, user_id, attachment_ids_to_process):
         """
         This method runs in the background via the Odoo job queue.
-        It processes all attached CVs, creates applicants, and notifies the user.
+        It processes only the specified CVs, creates applicants, and notifies the user.
         """
         self.ensure_one()
         
-        user = self.env['res.users'].browse(user_id)
-        partner = user.partner_id
-
         ApplicantEnv = self.env['hr.applicant']
         AttachmentEnv = self.env['ir.attachment']
         
@@ -139,11 +177,13 @@ class HrJob(models.Model):
         fail_count = 0
         errors = []
         
-        attachments = self.cv_attachment_ids
+        attachments = AttachmentEnv.browse(attachment_ids_to_process)
+        critical_error = False
 
         try:
             for att in attachments:
                 try:
+                    # Use a savepoint for each attachment to isolate failures
                     with self.env.cr.savepoint():
                         _logger.info(f"Processing CV: {att.name} for job {self.name}")
                         
@@ -188,42 +228,52 @@ class HrJob(models.Model):
                         })
                         
                         success_count += 1
+                        # Mark this CV as processed
+                        self.write({'processed_cv_attachment_ids': [(4, att.id)]})
                         _logger.info(f"Successfully processed applicant: {new_applicant.name}")
 
                 except Exception as e:
                     # This catches errors for *one* CV
-                    _logger.error(f"Failed to process CV {att.name} for job {self.name}: {e}")
+                    _logger.error(f"Failed to process CV {att.name} for job {self.name}: {e}", exc_info=True)
                     fail_count += 1
                     errors.append(f"{att.name}: {str(e)}")
-                
-                # We are in a job queue, so no manual commits needed here.
-                # The savepoint handles individual CV failures.
+                    # The savepoint automatically rolls back this CV's transaction
 
         except Exception as e:
-            # This catches a critical job-level error
+            # This catches a critical, job-stopping error (e.g., in setup)
+            critical_error = True
             _logger.error(f"Critical error during CV processing job {self.name}: {e}", exc_info=True)
             self.env.cr.rollback() 
             errors.append(f"Critical Job Failure: {str(e)}")
 
         finally:
-            # All files processed, update job state
-            # We browse(self.id) to ensure we have a fresh record
-            # in case of cache issues in the job.
-            self.browse(self.id).write({
-                'processing_in_progress': False,
-                'processing_complete': True
-            })
+            # This block *always* runs and *always* sends a notification.
+            try:
+                # Update job state
+                final_vals = {
+                    'processing_in_progress': False,
+                    'processing_complete': True,
+                    'processing_failed': bool(fail_count > 0 or critical_error) 
+                }
+                self.browse(self.id).write(final_vals)
 
-            # 6. Send final notification
+            except Exception as e_finally:
+                # If the *final write* fails, we have a critical problem.
+                critical_error = True
+                _logger.error(f"Critical error during finally block for job {self.name}: {e_finally}", exc_info=True)
+                errors.append(f"Critical Finally Block Error: {str(e_finally)}")
+
+            # Send final notification
+            job_failed = bool(fail_count > 0 or critical_error)
             message = _("CV processing finished for job '%s'.\n%s applicants created.\n%s failed.", 
                         self.name, success_count, fail_count)
             if errors:
                 message += _("\nErrors:\n- ") + "\n- ".join(errors)
 
             params = {
-                'title': _('Processing Complete'),
+                'title': _('Processing Complete') if not job_failed else _('Processing Finished with Errors'),
                 'message': message,
-                'type': 'success' if fail_count == 0 else 'warning',
-                'sticky': True,
+                'type': 'success' if not job_failed else 'warning',
+                'sticky': job_failed, # Make notification sticky if there was an error
             }
-            self.env['bus.bus']._sendone(partner, 'simple_notification', params)
+            self._notify_user(user_id, params)

@@ -26,6 +26,11 @@
                                        widget="many2many_binary"
                                        string="CVs to Process"
                                        readonly="processing_in_progress"/>
+                                <field name="processed_cv_attachment_ids"
+                                       widget="many2many_tags"
+                                       string="Processed CVs"
+                                       readonly="1"
+                                       nolabel="0"/>
                             </group>
                             <group>
                                 <button name="action_process_cvs"
@@ -33,14 +38,14 @@
                                         string="Add Candidates from CVs"
                                         class="oe_highlight"
                                         invisible="not cv_attachment_ids or processing_in_progress"
-                                        help="Process all attached CVs to create new applicants."/>
+                                        help="Process all attached CVs that have not yet been successfully processed."/>
                                 
                                 <button name="action_delete_cv_attachments"
                                         type="object"
                                         string="Delete Attached CVs"
                                         class="btn-danger"
                                         confirm="Are you sure you want to delete all uploaded CV attachments for this job? This action cannot be undone."
-                                        invisible="processing_in_progress or not processing_complete"
+                                        invisible="processing_in_progress or (not processing_complete and not processing_failed)"
                                         help="Delete all CVs from the 'CVs to Process' field."/>
 
                                 <div class="o_form_label" 
@@ -54,16 +59,27 @@
                                         You will be notified when the process is complete.
                                     </span>
                                 </div>
+                                
+                                <!-- Success Message -->
                                 <div class="text-muted" 
-                                     invisible="not processing_complete">
+                                     invisible="processing_in_progress or not processing_complete or processing_failed">
                                     <strong>Processing Complete.</strong>
                                     <br/>
-                                    You can now delete the attached files if they are no longer needed.
+                                    All CVs processed successfully. You can now delete the attached files.
+                                </div>
+                                
+                                <!-- Failure Message -->
+                                <div class="text-danger" 
+                                     invisible="processing_in_progress or not processing_failed">
+                                    <strong>Processing Failed.</strong>
+                                    <br/>
+                                    One or more CVs could not be processed. You can click "Add Candidates" to retry the failed files, or delete all files to start over.
                                 </div>
                             </group>
                         </group>
                         <field name="processing_in_progress" invisible="1"/>
                         <field name="processing_complete" invisible="1"/>
+                        <field name="processing_failed" invisible="1"/>
                     </page>
                 </xpath>
             </field>
