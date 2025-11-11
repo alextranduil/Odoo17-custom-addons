@@ -29,6 +29,6 @@ class ResCompany(models.Model):
     openai_model = fields.Char(
         string="OpenAI Model",
         copy=False,
-        default="gpt-4o-mini",
+        default="gpt-4o",
         help="Specify the OpenAI model to use (e.g., 'gpt-4o-mini', 'gpt-4o')."
     )

@@ -90,7 +90,6 @@ class HrApplicant(models.Model):
 
     linkedin_profile = fields.Char(
         "LinkedIn Profile",
-        tracking=True,
         copy=False,
         help="Stores the LinkedIn profile URL extracted from the CV."
     )
@@ -269,7 +268,7 @@ class HrApplicant(models.Model):
 
         # Strip whitespace from config fields
         api_key = (company.openai_api_key or '').strip()
-        model_name = (company.openai_model or 'gpt-4o-mini').strip()
+        model_name = (company.openai_model or 'gpt-4o').strip()
 
         # Validate Configuration
         if not api_key:

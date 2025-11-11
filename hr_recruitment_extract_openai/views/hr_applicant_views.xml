@@ -11,8 +11,7 @@
                     class="oe_highlight"
                     string="Extract with OpenAI"
                     type="object"
-                    invisible="not can_extract_with_openai"
-                    data-hotkey="o"/>
+                    invisible="not can_extract_with_openai"/>
             </xpath>
             <xpath expr="//header" position="after">
                 <field name="openai_extract_state" invisible="1"/>
