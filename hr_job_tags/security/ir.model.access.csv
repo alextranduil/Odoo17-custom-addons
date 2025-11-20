@@ -1,0 +1,4 @@
+id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
+access_hr_job_tag_user,hr.job.tag.user,model_hr_job_tag,hr.group_hr_user,1,1,1,1
+access_hr_job_tag_manager,hr.job.tag.manager,model_hr_job_tag,hr.group_hr_manager,1,1,1,1
+access_hr_job_tag_all,hr.job.tag.public,model_hr_job_tag,,1,0,0,0

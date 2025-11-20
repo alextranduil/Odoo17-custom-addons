@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_hr_job_tag_tree" model="ir.ui.view">
+        <field name="name">hr.job.tag.tree</field>
+        <field name="model">hr.job.tag</field>
+        <field name="arch" type="xml">
+            <tree string="Job Tags" editable="bottom">
+                <field name="name"/>
+                <field name="color" widget="color_picker"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="view_hr_job_tag_form" model="ir.ui.view">
+        <field name="name">hr.job.tag.form</field>
+        <field name="model">hr.job.tag</field>
+        <field name="arch" type="xml">
+            <form string="Job Tag">
+                <sheet>
+                    <group>
+                        <group>
+                            <field name="name"/>
+                            <field name="color" widget="color_picker"/>
+                        </group>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_hr_job_tag" model="ir.actions.act_window">
+        <field name="name">Job Tags</field>
+        <field name="res_model">hr.job.tag</field>
+        <field name="view_mode">tree,form</field>
+        <field name="help" type="html">
+          <p class="o_view_nocontent_smiling_face">
+            Create a new job tag
+          </p>
+        </field>
+    </record>
+
+    <menuitem id="menu_hr_job_tag"
+              name="Job Tags"
+              parent="hr.menu_human_resources_configuration"
+              action="action_hr_job_tag"
+              sequence="15"/>
+</odoo>
