@@ -12,54 +12,62 @@
                     <group>
                         <group>
                             <field name="cv_attachment_ids"
-                                   widget="many2many_binary"
-                                   string="CVs to Process"
-                                   readonly="bulk_processing_in_progress"/>
+                                widget="many2many_binary"
+                                string="CVs to Process"
+                                readonly="bulk_processing_in_progress"/>
                             <field name="processed_cv_attachment_ids"
-                                   widget="many2many_tags"
-                                   string="Successfully Processed CVs"
-                                   readonly="1"
-                                   nolabel="0"
-                                   invisible="not processed_cv_attachment_ids"/>
+                                widget="many2many_tags"
+                                string="Successfully Processed CVs"
+                                readonly="1"
+                                nolabel="0"
+                                invisible="not processed_cv_attachment_ids"/>
                         </group>
                         <group>
-                            <!-- 
-                                <field name="run_ai_match_on_bulk" readonly="bulk_processing_in_progress"/>
-                            -->
+                            <field name="run_ai_match_on_bulk"
+                                readonly="bulk_processing_in_progress"/>
                             
                             <button name="action_process_cvs"
-                                    type="object"
-                                    string="Add Candidates from CVs"
-                                    class="oe_highlight"
-                                    invisible="not cv_attachment_ids or bulk_processing_in_progress"
-                                    help="Process all attached CVs."/>
+                                type="object"
+                                string="Add Candidates from CVs"
+                                class="oe_highlight"
+                                invisible="not cv_attachment_ids or bulk_processing_in_progress"
+                                help="Process all attached CVs."/>
                             
                             <button name="action_delete_cv_attachments"
-                                    type="object"
-                                    string="Delete Attached CVs"
-                                    class="btn-danger"
-                                    confirm="Delete all files? Cannot be undone."
-                                    invisible="bulk_processing_in_progress"
-                                    help="Reset all counters and delete files."/>
+                                type="object"
+                                string="Delete Attached CVs"
+                                class="btn-danger"
+                                confirm="Delete all files? Cannot be undone."
+                                invisible="bulk_processing_in_progress"
+                                help="Reset all counters and delete files."/>
 
-                            <div class="o_form_label" invisible="not bulk_processing_in_progress">
+                            <div class="o_form_label"
+                                invisible="not bulk_processing_in_progress">
                                 <strong>Processing...</strong>
                             </div>
+                            
                             <div invisible="not bulk_processing_in_progress">
-                                <span><i class="fa fa-spinner fa-spin"/> Creating applicants...</span>
+                                <span>
+                                    <i class="fa fa-spinner fa-spin"/> Creating applicants...
+                                </span>
                                 <field name="bulk_processing_progress" widget="progressbar"/>
                                 <div class="o_form_label">
                                     <span>Processed: <field name="processed_cv_count" class="oe_inline"/></span>
-                                    <span class="text-danger" invisible="failed_cv_count == 0">, Failed: <field name="failed_cv_count" class="oe_inline"/></span>
+                                    <span class="text-danger" invisible="failed_cv_count == 0">
+                                        , Failed: <field name="failed_cv_count" class="oe_inline"/>
+                                    </span>
                                     <span>/ <field name="total_cv_count" class="oe_inline"/></span>
                                 </div>
                             </div>
                             
-                            <div class="text-muted" invisible="bulk_processing_in_progress or not bulk_processing_complete or bulk_processing_failed">
-                                <strong>Complete.</strong> <field name="processed_cv_count" class="oe_inline"/> CVs processed.
+                            <div class="text-muted"
+                                invisible="bulk_processing_in_progress or not bulk_processing_complete or bulk_processing_failed">
+                                <strong>Complete.</strong>
+                                <field name="processed_cv_count" class="oe_inline"/> CVs processed.
                             </div>
                             
-                            <div class="text-danger" invisible="bulk_processing_in_progress or not bulk_processing_failed">
+                            <div class="text-danger"
+                                invisible="bulk_processing_in_progress or not bulk_processing_failed">
                                 <strong>Finished with Errors.</strong>
                             </div>
                         </group>
@@ -81,39 +89,42 @@
                     <group>
                         <group string="1. Job Description File">
                             <field name="job_description_attachment_ids"
-                                   widget="many2many_binary"
-                                   string="Job Description File"
-                                   options="{'accepted_file_extensions': '.pdf,.docx,.txt,.md'}"
-                                   invisible="jd_processed_attachment_ids"
-                                   readonly="jd_processing_in_progress"/>
+                                widget="many2many_binary"
+                                string="Job Description File"
+                                options="{'accepted_file_extensions': '.pdf,.docx,.txt,.md'}"
+                                invisible="jd_processed_attachment_ids"
+                                readonly="jd_processing_in_progress"/>
                             
                             <field name="jd_processed_attachment_ids"
-                                   widget="many2many_tags"
-                                   string="Processed File"
-                                   readonly="1"
-                                   invisible="not jd_processed_attachment_ids"/>
+                                widget="many2many_tags"
+                                string="Processed File"
+                                readonly="1"
+                                invisible="not jd_processed_attachment_ids"/>
                         </group>
                         <group string="2. AI Processing">
                             <button name="action_generate_requirements_from_file"
-                                    type="object"
-                                    string="Generate Requirements"
-                                    class="oe_highlight"
-                                    invisible="jd_processing_in_progress or not job_description_attachment_ids"/>
+                                type="object"
+                                string="Generate Requirements"
+                                class="oe_highlight"
+                                invisible="jd_processing_in_progress or not job_description_attachment_ids"/>
+                            
                             <button name="action_delete_jd_attachment"
-                                    type="object"
-                                    string="Delete Attached JD"
-                                    class="btn-danger"
-                                    invisible="jd_processing_in_progress or not (job_description_attachment_ids or jd_processed_attachment_ids)"
-                                    confirm="Delete JD file?"/>
+                                type="object"
+                                string="Delete Attached JD"
+                                class="btn-danger"
+                                invisible="jd_processing_in_progress or not (job_description_attachment_ids or jd_processed_attachment_ids)"
+                                confirm="Delete JD file?"/>
                             
                             <div invisible="not jd_processing_in_progress" class="mt-2">
                                 <strong><i class="fa fa-spinner fa-spin"/> Processing...</strong>
                             </div>
                             <div invisible="jd_processing_in_progress or jd_extract_state != 'done'" class="text-success mt-2">
-                                <strong>Complete.</strong> <field name="jd_extract_status" class="oe_inline" readonly="1"/>
+                                <strong>Complete.</strong>
+                                <field name="jd_extract_status" class="oe_inline" readonly="1"/>
                             </div>
                             <div invisible="jd_processing_in_progress or jd_extract_state != 'error'" class="text-danger mt-2">
-                                <strong>Failed.</strong> <field name="jd_extract_status" class="oe_inline" readonly="1"/>
+                                <strong>Failed.</strong>
+                                <field name="jd_extract_status" class="oe_inline" readonly="1"/>
                             </div>
                         </group>
                     </group>
@@ -131,7 +142,9 @@
                     <separator string="Matching Strategy"/>
                     <group>
                         <group>
-                            <field name="ai_match_mode" widget="radio" invisible="jd_processing_in_progress"/>
+                            <field name="ai_match_mode"
+                                widget="radio"
+                                invisible="jd_processing_in_progress"/>
                         </group>
                     </group>
                     

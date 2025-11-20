@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-from odoo import api, fields, models, _
+from odoo import fields, models
+
 
 class HrJobRequirement(models.Model):
     """
@@ -12,31 +13,33 @@ class HrJobRequirement(models.Model):
 
     name = fields.Char(string='Requirement', required=True)
     sequence = fields.Integer(default=10)
-    
+
     job_id = fields.Many2one(
-        'hr.job', 
-        string='Job Position', 
-        required=True, 
+        'hr.job',
+        string='Job Position',
+        required=True,
         ondelete='cascade'
     )
-    
+
     weight = fields.Float(
-        string='Weight', 
-        default=1.0, 
+        string='Weight',
+        default=1.0,
         digits=(16, 2),
-        help="Importance of this requirement. Higher weight = more impact on the final score."
+        help="Importance of this requirement. "
+             "Higher weight = more impact on the final score."
     )
-    
+
     tag_ids = fields.Many2many(
-        'hr.job.requirement.tag', 
+        'hr.job.requirement.tag',
         string='Tags',
         help="Classify this requirement (e.g., Hard Skill, Soft Skill)."
     )
-    
+
     company_relevance_ids = fields.Many2many(
         'res.partner',
         string='Relevant Companies',
-        help="Specify companies where experience in this area is a significant plus."
+        help="Specify companies where experience in this area is a "
+             "significant plus."
     )
 
     _sql_constraints = [

@@ -11,9 +11,9 @@ class HrApplicantMatchStatement(models.Model):
     _order = 'requirement_id'
 
     applicant_id = fields.Many2one(
-        'hr.applicant', 
-        string='Applicant', 
-        required=True, 
+        'hr.applicant',
+        string='Applicant',
+        required=True,
         ondelete='cascade'
     )
     job_id = fields.Many2one(
@@ -21,8 +21,8 @@ class HrApplicantMatchStatement(models.Model):
         store=True
     )
     requirement_id = fields.Many2one(
-        'hr.job.requirement', 
-        string='Requirement', 
+        'hr.job.requirement',
+        string='Requirement',
         required=True,
         ondelete='cascade'
     )
@@ -35,7 +35,7 @@ class HrApplicantMatchStatement(models.Model):
         string='Weight',
         store=True
     )
-    
+
     match_fit = fields.Selection(
         selection=[
             ('not_fit', 'Not a Fit'),
@@ -48,7 +48,7 @@ class HrApplicantMatchStatement(models.Model):
         default='not_fit',
         required=True,
     )
-    
+
     match_score = fields.Float(
         string='Score (%)',
         compute='_compute_match_score',
@@ -56,12 +56,12 @@ class HrApplicantMatchStatement(models.Model):
         digits=(16, 2),
         help="Numeric score from 0 to 100 based on the 'Fit' level."
     )
-    
+
     explanation = fields.Text(
         string='Explanation',
         help="AI's explanation for the score, citing resume text."
     )
-    
+
     @api.depends('match_fit')
     def _compute_match_score(self):
         """Converts the selection 'fit' field to a numeric score."""
